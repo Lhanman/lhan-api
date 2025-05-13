@@ -124,13 +124,19 @@ func uploadDifyFile(c *gin.Context, info *relaycommon.RelayInfo, user string, me
 func requestOpenAI2Dify(c *gin.Context, info *relaycommon.RelayInfo, request dto.GeneralOpenAIRequest) *DifyChatRequest {
 	difyReq := DifyChatRequest{
 		Inputs:           make(map[string]interface{}),
-		AutoGenerateName: false,
+		AutoGenerateName: true,
 	}
 
-	user := request.User
-	if user == "" {
-		user = helper.GetResponseID(c)
+	override := c.GetStringMap("param_override")
+	inputs, ok := override["inputs"].(map[string]interface{})
+	common.SysLog("dify override: " + fmt.Sprintf("%+v", override) + ", inputs: " + fmt.Sprintf("%+v", inputs))
+	if ok && inputs != nil {
+		difyReq.Inputs = inputs
+	} else {
+		difyReq.Inputs = make(map[string]interface{})
 	}
+	user := "liujiahao10570"
+	common.SysLog("dify user: " + user + ", inputs : " + fmt.Sprintf("%+v", difyReq.Inputs))
 	difyReq.User = user
 
 	files := make([]DifyFile, 0)
@@ -165,10 +171,11 @@ func requestOpenAI2Dify(c *gin.Context, info *relaycommon.RelayInfo, request dto
 	}
 	difyReq.Query = content.String()
 	difyReq.Files = files
-	mode := "blocking"
-	if request.Stream {
-		mode = "streaming"
-	}
+	mode := "streaming"
+	// if request.Stream {
+	// 	mode = "streaming"
+	// }
+	common.SysLog("difyReq: " + difyReq.Query + ", mode: " + mode)
 	difyReq.ResponseMode = mode
 	return &difyReq
 }
@@ -268,6 +275,8 @@ func difyHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInf
 	if err != nil {
 		return service.OpenAIErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
+	// Log the raw response body before attempting to unmarshal
+	common.SysLog(fmt.Sprintf("Dify raw response: %s", string(responseBody)))
 	err = json.Unmarshal(responseBody, &difyResponse)
 	if err != nil {
 		return service.OpenAIErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil

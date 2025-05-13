@@ -360,7 +360,7 @@ const HeaderBar = () => {
                           display: 'inline-block',
                         }}
                       >
-                        <span style={systemNameStyle}>{systemName}</span>
+                        <span style={systemNameStyle}>LhanMan</span>
                         {(isSelfUseMode || isDemoSiteMode) && (
                           <Tag
                             color={isSelfUseMode ? 'purple' : 'blue'}
