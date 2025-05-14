@@ -25,6 +25,7 @@ import (
 
 func relayHandler(c *gin.Context, relayMode int) *dto.OpenAIErrorWithStatusCode {
 	var err *dto.OpenAIErrorWithStatusCode
+	common.LogInfo(c, fmt.Sprintf("relayHandler relayMode: %d", relayMode))
 	switch relayMode {
 	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
 		err = relay.ImageHelper(c)
@@ -73,6 +74,7 @@ func Relay(c *gin.Context) {
 	originalModel := c.GetString("original_model")
 	var openaiErr *dto.OpenAIErrorWithStatusCode
 
+	common.LogInfo(c, fmt.Sprintf("Relay relayMode: %d", relayMode))
 	for i := 0; i <= common.RetryTimes; i++ {
 		channel, err := getChannel(c, group, originalModel, i)
 		if err != nil {
@@ -82,6 +84,7 @@ func Relay(c *gin.Context) {
 		}
 
 		openaiErr = relayRequest(c, relayMode, channel)
+		common.LogInfo(c, fmt.Sprintf("Relay openaiErr: %v", openaiErr))
 
 		if openaiErr == nil {
 			return // 成功处理请求，直接返回

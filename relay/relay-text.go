@@ -71,28 +71,37 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 }
 
 func TextHelper(c *gin.Context) (openaiErr *dto.OpenAIErrorWithStatusCode) {
+	reqId := c.GetString("request_id")
+	common.LogInfo(c, fmt.Sprintf("[%s] TextHelper开始处理请求", reqId))
 
 	relayInfo := relaycommon.GenRelayInfo(c)
+	common.LogInfo(c, fmt.Sprintf("[%s] 生成中继信息: 用户ID=%d, 渠道ID=%d, 模型=%s, 中继模式=%d",
+		reqId, relayInfo.UserId, relayInfo.ChannelId, relayInfo.OriginModelName, relayInfo.RelayMode))
 
 	// get & validate textRequest 获取并验证文本请求
 	textRequest, err := getAndValidateTextRequest(c, relayInfo)
 	if err != nil {
-		common.LogError(c, fmt.Sprintf("getAndValidateTextRequest failed: %s", err.Error()))
+		common.LogError(c, fmt.Sprintf("[%s] getAndValidateTextRequest failed: %s", reqId, err.Error()))
 		return service.OpenAIErrorWrapperLocal(err, "invalid_text_request", http.StatusBadRequest)
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 文本请求验证成功，模型=%s, 流式=%v", reqId, textRequest.Model, relayInfo.IsStream))
 
 	if setting.ShouldCheckPromptSensitive() {
+		common.LogInfo(c, fmt.Sprintf("[%s] 开始检查敏感词", reqId))
 		words, err := checkRequestSensitive(textRequest, relayInfo)
 		if err != nil {
-			common.LogWarn(c, fmt.Sprintf("user sensitive words detected: %s", strings.Join(words, ", ")))
+			common.LogWarn(c, fmt.Sprintf("[%s] 用户敏感词检测: %s", reqId, strings.Join(words, ", ")))
 			return service.OpenAIErrorWrapperLocal(err, "sensitive_words_detected", http.StatusBadRequest)
 		}
+		common.LogInfo(c, fmt.Sprintf("[%s] 敏感词检查通过", reqId))
 	}
 
 	err = helper.ModelMappedHelper(c, relayInfo)
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[%s] 模型映射错误: %s", reqId, err.Error()))
 		return service.OpenAIErrorWrapperLocal(err, "model_mapped_error", http.StatusInternalServerError)
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 模型映射完成: 源模型=%s, 上游模型=%s", reqId, relayInfo.OriginModelName, relayInfo.UpstreamModelName))
 
 	textRequest.Model = relayInfo.UpstreamModelName
 
@@ -101,27 +110,37 @@ func TextHelper(c *gin.Context) (openaiErr *dto.OpenAIErrorWithStatusCode) {
 	if value, exists := c.Get("prompt_tokens"); exists {
 		promptTokens = value.(int)
 		relayInfo.PromptTokens = promptTokens
+		common.LogInfo(c, fmt.Sprintf("[%s] 从上下文获取promptTokens=%d", reqId, promptTokens))
 	} else {
 		promptTokens, err = getPromptTokens(textRequest, relayInfo)
 		// count messages token error 计算promptTokens错误
 		if err != nil {
+			common.LogError(c, fmt.Sprintf("[%s] 计算token失败: %s", reqId, err.Error()))
 			return service.OpenAIErrorWrapper(err, "count_token_messages_failed", http.StatusInternalServerError)
 		}
 		c.Set("prompt_tokens", promptTokens)
+		common.LogInfo(c, fmt.Sprintf("[%s] 计算获取promptTokens=%d", reqId, promptTokens))
 	}
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, promptTokens, int(math.Max(float64(textRequest.MaxTokens), float64(textRequest.MaxCompletionTokens))))
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[%s] 模型价格计算错误: %s", reqId, err.Error()))
 		return service.OpenAIErrorWrapperLocal(err, "model_price_error", http.StatusInternalServerError)
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 价格计算完成: 模型价格=%f, 组倍率=%f, 使用价格=%v",
+		reqId, priceData.ModelPrice, priceData.GroupRatio, priceData.UsePrice))
 
 	// pre-consume quota 预消耗配额
 	preConsumedQuota, userQuota, openaiErr := preConsumeQuota(c, priceData.ShouldPreConsumedQuota, relayInfo)
 	if openaiErr != nil {
+		common.LogError(c, fmt.Sprintf("[%s] 预消耗配额失败: %s", reqId, openaiErr.Error.Message))
 		return openaiErr
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 预消耗配额完成: 预消耗=%d, 用户余额=%d", reqId, preConsumedQuota, userQuota))
+
 	defer func() {
 		if openaiErr != nil {
+			common.LogInfo(c, fmt.Sprintf("[%s] 请求失败，退还预消耗配额: %d", reqId, preConsumedQuota))
 			returnPreConsumedQuota(c, relayInfo, userQuota, preConsumedQuota)
 		}
 	}()
@@ -149,32 +168,43 @@ func TextHelper(c *gin.Context) (openaiErr *dto.OpenAIErrorWithStatusCode) {
 
 	adaptor := GetAdaptor(relayInfo.ApiType)
 	if adaptor == nil {
+		common.LogError(c, fmt.Sprintf("[%s] 无效的API类型: %d", reqId, relayInfo.ApiType))
 		return service.OpenAIErrorWrapperLocal(fmt.Errorf("invalid api type: %d", relayInfo.ApiType), "invalid_api_type", http.StatusBadRequest)
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 获取适配器成功: API类型=%d", reqId, relayInfo.ApiType))
+
 	adaptor.Init(relayInfo)
 	var requestBody io.Reader
 
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled {
 		body, err := common.GetRequestBody(c)
 		if err != nil {
+			common.LogError(c, fmt.Sprintf("[%s] 获取请求体失败: %s", reqId, err.Error()))
 			return service.OpenAIErrorWrapperLocal(err, "get_request_body_failed", http.StatusInternalServerError)
 		}
 		requestBody = bytes.NewBuffer(body)
+		common.LogInfo(c, fmt.Sprintf("[%s] 透传请求体模式", reqId))
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, relayInfo, textRequest)
 		if err != nil {
+			common.LogError(c, fmt.Sprintf("[%s] 转换请求失败: %s", reqId, err.Error()))
 			return service.OpenAIErrorWrapperLocal(err, "convert_request_failed", http.StatusInternalServerError)
 		}
+		common.LogInfo(c, fmt.Sprintf("[%s] 请求转换成功", reqId))
+
 		jsonData, err := json.Marshal(convertedRequest)
 		if err != nil {
+			common.LogError(c, fmt.Sprintf("[%s] JSON序列化失败: %s", reqId, err.Error()))
 			return service.OpenAIErrorWrapperLocal(err, "json_marshal_failed", http.StatusInternalServerError)
 		}
 
 		// apply param override
 		if len(relayInfo.ParamOverride) > 0 {
+			common.LogInfo(c, fmt.Sprintf("[%s] 应用参数覆盖，参数数量=%d", reqId, len(relayInfo.ParamOverride)))
 			reqMap := make(map[string]interface{})
 			err = json.Unmarshal(jsonData, &reqMap)
 			if err != nil {
+				common.LogError(c, fmt.Sprintf("[%s] 参数覆盖解析失败: %s", reqId, err.Error()))
 				return service.OpenAIErrorWrapperLocal(err, "param_override_unmarshal_failed", http.StatusInternalServerError)
 			}
 			for key, value := range relayInfo.ParamOverride {
@@ -182,47 +212,61 @@ func TextHelper(c *gin.Context) (openaiErr *dto.OpenAIErrorWithStatusCode) {
 			}
 			jsonData, err = json.Marshal(reqMap)
 			if err != nil {
+				common.LogError(c, fmt.Sprintf("[%s] 参数覆盖序列化失败: %s", reqId, err.Error()))
 				return service.OpenAIErrorWrapperLocal(err, "param_override_marshal_failed", http.StatusInternalServerError)
 			}
 		}
-
-		if common.DebugEnabled {
-			println("requestBody: ", string(jsonData))
-		}
+		common.LogInfo(c, fmt.Sprintf("requestBody: %s", string(jsonData)))
 		requestBody = bytes.NewBuffer(jsonData)
 	}
 
+	common.LogInfo(c, fmt.Sprintf("[%s] 开始发送请求", reqId))
 	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, relayInfo, requestBody)
 	if err != nil {
+		common.LogError(c, fmt.Sprintf("[%s] 请求失败: %s", reqId, err.Error()))
 		return service.OpenAIErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 请求发送成功", reqId))
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
 	if resp != nil {
 		httpResp = resp.(*http.Response)
 		relayInfo.IsStream = relayInfo.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		common.LogInfo(c, fmt.Sprintf("[%s] 收到响应: 状态码=%d, 内容类型=%s, 流式=%v",
+			reqId, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), relayInfo.IsStream))
+
 		if httpResp.StatusCode != http.StatusOK {
 			openaiErr = service.RelayErrorHandler(httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+			common.LogError(c, fmt.Sprintf("[%s] 响应状态码错误: %d, 错误=%s",
+				reqId, httpResp.StatusCode, openaiErr.Error.Message))
 			return openaiErr
 		}
 	}
 
+	common.LogInfo(c, fmt.Sprintf("[%s] 开始处理响应", reqId))
 	usage, openaiErr := adaptor.DoResponse(c, httpResp, relayInfo)
 	if openaiErr != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+		common.LogError(c, fmt.Sprintf("[%s] 处理响应失败: %s", reqId, openaiErr.Error.Message))
 		return openaiErr
 	}
+	common.LogInfo(c, fmt.Sprintf("[%s] 响应处理成功", reqId))
 
 	if strings.HasPrefix(relayInfo.OriginModelName, "gpt-4o-audio") {
+		common.LogInfo(c, fmt.Sprintf("[%s] 音频模型消费配额", reqId))
 		service.PostAudioConsumeQuota(c, relayInfo, usage.(*dto.Usage), preConsumedQuota, userQuota, priceData, "")
 	} else {
+		common.LogInfo(c, fmt.Sprintf("[%s] 消费配额: promptTokens=%d, completionTokens=%d",
+			reqId, usage.(*dto.Usage).PromptTokens, usage.(*dto.Usage).CompletionTokens))
 		postConsumeQuota(c, relayInfo, usage.(*dto.Usage), preConsumedQuota, userQuota, priceData, "")
 	}
+
+	common.LogInfo(c, fmt.Sprintf("[%s] TextHelper处理完成", reqId))
 	return nil
 }
 
